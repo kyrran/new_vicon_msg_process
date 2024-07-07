@@ -7,72 +7,47 @@ Usage: python3 rosbag_reader_combined.py --path ~/Documents/rosbag-tensile-perch
 
 All ros topics related to the positions of the drone, payload, and round bar are as follows:
 
-Drone ROS2 Topics: /fmu/out/vehicle_status
+Drone ROS2 Topics: /vicon/beemav/beemav
+Payload ROS2 Topics: /vicon/perching_payload/perching_payload
+Round Bar ROS2 Topics: /vicon/perching_round_bar/perching_round_bar
 '''
+
 import csv
 import os
 import argparse
 from collections import defaultdict
 from rosbags.rosbag2 import Reader
 from rosbags.typesys import Stores, get_types_from_msg, get_typestore
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 # Topics to read from
 TOPICS = {
-    'drone': '/fmu/out/vehicle_status'
+    'drone': '/vicon/beemav/beemav',  # Drone ROS2 Topic
+    'payload': '/vicon/perching_payload/perching_payload',  # Payload ROS2 Topic
+    'round_bar': '/vicon/perching_round_bar/perching_round_bar'  # Round Bar ROS2 Topic
 }
 
-# Correct message definition for px4_msgs/msg/VehicleStatus
+# vicon_msgs/msg/Position message definition
 STRIDX_MSG = """
-uint64 timestamp
-uint64 armed_time
-uint64 takeoff_time
-uint8 arming_state
-uint8 latest_arming_reason
-uint8 latest_disarming_reason
-uint64 nav_state_timestamp
-uint8 nav_state_user_intention
-uint8 nav_state
-uint8 executor_in_charge
-uint32 valid_nav_states_mask
-uint32 can_set_nav_states_mask
-uint16 failure_detector_status
-uint8 hil_state
-uint8 vehicle_type
-bool failsafe
-bool failsafe_and_user_took_over
-uint8 failsafe_defer_state
-bool gcs_connection_lost
-uint8 gcs_connection_lost_counter
-bool high_latency_data_link_lost
-bool is_vtol
-bool is_vtol_tailsitter
-bool in_transition_mode
-bool in_transition_to_fw
-uint8 system_type
-uint8 system_id
-uint8 component_id
-bool safety_button_available
-bool safety_off
-bool power_input_valid
-bool usb_connected
-bool open_drone_id_system_present
-bool open_drone_id_system_healthy
-bool parachute_system_present
-bool parachute_system_healthy
-bool avoidance_system_required
-bool avoidance_system_valid
-bool rc_calibration_in_progress
-bool calibration_enabled
-bool pre_flight_checks_pass
+float32 x_trans
+float32 y_trans
+float32 z_trans
+float32 x_rot 
+float32 y_rot 
+float32 z_rot 
+float32 w 
+string segment_name
+string subject_name 
+int32 frame_number
+string translation_type
 """
 
 # Initialize the typestore and register the custom message type
 typestore = get_typestore(Stores.ROS2_HUMBLE)
-typestore.register(get_types_from_msg(STRIDX_MSG, 'px4_msgs/msg/VehicleStatus'))
+typestore.register(get_types_from_msg(STRIDX_MSG, 'vicon_msgs/msg/Position'))
 
-StrIdx = typestore.types['px4_msgs/msg/VehicleStatus']
+StrIdx = typestore.types['vicon_msgs/msg/Position']
 
 def print_connections(reader):
     """Prints all topic and msgtype information available in the rosbag."""
@@ -82,21 +57,25 @@ def print_connections(reader):
 def collect_messages(reader, topics):
     """Collects messages from specified topics in the rosbag and returns a dictionary of timestamped data."""
     data = defaultdict(lambda: {
-        #'timestamp':None,
-        'armed_time': None, 'takeoff_time': None,
-        'nav_state_user_intention':None, 'nav_state': None
+        'drone_x': np.nan, 'drone_y': np.nan, 'drone_z': np.nan,
+        'drone_x_rot': np.nan, 'drone_y_rot': np.nan, 'drone_z_rot': np.nan,
+        'payload_x': np.nan, 'payload_y': np.nan, 'payload_z': np.nan,
+        'payload_x_rot': np.nan, 'payload_y_rot': np.nan, 'payload_z_rot': np.nan,
+        'round_bar_x': np.nan, 'round_bar_y': np.nan, 'round_bar_z': np.nan,
+        'round_bar_x_rot': np.nan, 'round_bar_y_rot': np.nan, 'round_bar_z_rot': np.nan
+       
     })
 
     for name, topic in topics.items():
         connections = [x for x in reader.connections if x.topic == topic]
         for connection, timestamp, rawdata in reader.messages(connections=connections):
             msg = typestore.deserialize_cdr(rawdata, connection.msgtype)
-            #data[timestamp]['timestamp']=msg.timestamp
-            data[timestamp]['armed_time'] = msg.armed_time
-            data[timestamp]['takeoff_time'] = msg.takeoff_time
-            data[timestamp]['nav_state_user_intention'] = msg.nav_state_user_intention
-            data[timestamp]['nav_state'] = msg.nav_state
-
+            data[timestamp][f'{name}_x'] = msg.x_trans
+            data[timestamp][f'{name}_y'] = msg.y_trans
+            data[timestamp][f'{name}_z'] = msg.z_trans
+            data[timestamp][f'{name}_x_rot'] = msg.x_rot
+            data[timestamp][f'{name}_y_rot'] = msg.y_rot
+            data[timestamp][f'{name}_z_rot'] = msg.z_rot
 
     return data
 
@@ -109,21 +88,13 @@ def interpolate_data(data):
     df.bfill(inplace=True)
     return df
 
-def save_messages_to_csv(data, csv_filename):
-    """Saves the collected data to a CSV file."""
-    # Ensure the data is in the correct format
-    formatted_data = {k: {kk: (vv if not isinstance(vv, np.ndarray) else vv.tolist()) for kk, vv in v.items()} for k, v in data.items()}
-    
-    # Convert the dictionary to a DataFrame
-    df = pd.DataFrame.from_dict(formatted_data, orient='index')
-    
-    # Save the DataFrame to a CSV file
+def save_messages_to_csv(df, csv_filename):
+    """Saves the interpolated data to a CSV file."""
     df.to_csv(csv_filename, index_label='Timestamp')
     print(f"Data saved to {csv_filename}")
 
-
 def main():
-    """Main function to read the rosbag, process messages, and save them to a CSV file."""
+    """Main function to read the rosbag, process messages, interpolate data, and save them to a CSV file."""
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Process a rosbag file and save extracted data to a CSV file.')
     parser.add_argument('--path', required=True, help='Path to the rosbag file')
@@ -136,13 +107,13 @@ def main():
         
         print("\nCollecting Positions:")
         data = collect_messages(reader, TOPICS)
-
-        print("\n Interpolating Data:")
+        
+        print("\nInterpolating Data:")
         df = interpolate_data(data)
         
         # Extract folder name from the bag path and create the CSV filename
         folder_name = os.path.basename(bag_path)
-        csv_filename = f'{folder_name}_state.csv'
+        csv_filename = f'{folder_name}.csv'
         save_messages_to_csv(df, csv_filename)
 
 if __name__ == "__main__":
